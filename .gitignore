@@ -9,3 +9,4 @@ dist/
 
 .sandbox.sh
 /tests/
+archive/
