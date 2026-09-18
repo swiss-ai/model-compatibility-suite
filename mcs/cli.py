@@ -2,8 +2,10 @@
 
 Runs the deterministic suites against a served model and prints a capability
 table (✔/✗/⚠ per check), exiting non-zero on any failure. Scope to one
-capability with `--capability TYPE`, or compare models with repeated `--model`.
-See SPEC.md sections 3 and 8.
+capability with `--capability TYPE`, compare models with repeated `--model`,
+or compare across different providers/endpoints with `--providers-config`
+(SPEC.md §13; mutually exclusive with --base-url/--model/--rate-limit).
+See SPEC.md sections 3, 8, and 13.
 """
 
 import argparse
@@ -39,6 +41,16 @@ def main(argv=None) -> int:
     )
     p.add_argument("--base-url")
     p.add_argument(
+        "--providers-config",
+        metavar="PATH",
+        dest="providers_config",
+        help="YAML file of named providers (base_url/api_key_env/model each) "
+        "to compare across different endpoints, e.g. CSCS vs RCP (SPEC.md "
+        "§13). Runs every provider listed in the file -- put only the ones "
+        "you want compared in it. Mutually exclusive with --base-url/"
+        "--model/--rate-limit and their MCS_* env equivalents.",
+    )
+    p.add_argument(
         "--rate-limit",
         dest="rate_limit",
         type=float,
@@ -71,6 +83,26 @@ def main(argv=None) -> int:
     )
     args = p.parse_args(argv)
 
+    if args.providers_config:
+        # Strict mode split (SPEC.md §13): args/env-var mode and
+        # --providers-config are mutually exclusive, never silently merged.
+        # Detected at the flag/env layer (not via Config.from_env(), whose
+        # resolved values are indistinguishable from its own defaults).
+        conflicts = []
+        if args.base_url or os.environ.get("MCS_API_BASE"):
+            conflicts.append("--base-url/MCS_API_BASE")
+        if args.model or os.environ.get("MCS_MODEL"):
+            conflicts.append("--model/MCS_MODEL")
+        if args.rate_limit is not None or os.environ.get("MCS_RATE_LIMIT"):
+            conflicts.append("--rate-limit/MCS_RATE_LIMIT")
+        if os.environ.get("MCS_TIMEOUT"):
+            conflicts.append("MCS_TIMEOUT")
+        if conflicts:
+            p.error(
+                "--providers-config cannot be combined with "
+                f"{', '.join(conflicts)} -- use one mode or the other, not both"
+            )
+
     models = args.model or []
     if len(models) == 1:
         os.environ["MCS_MODEL"] = models[0]
@@ -100,7 +132,24 @@ def main(argv=None) -> int:
     import dataclasses
 
     from .capabilities import report, report_compare
-    from .config import Config
+    from .config import Config, load_providers
+
+    if args.providers_config:
+        try:
+            cfgs = load_providers(args.providers_config)
+        except (OSError, ValueError) as e:
+            p.error(str(e))
+        if len(cfgs) == 1:
+            return report(
+                cfgs[0],
+                capability=cap,
+                spec=args.spec,
+                as_json=args.json,
+                junit=args.junit,
+            )
+        return report_compare(
+            cfgs, capability=cap, spec=args.spec, as_json=args.json, detail=args.detail
+        )
 
     base = Config.from_env()
     if not base.api_key:

@@ -1,4 +1,4 @@
-.PHONY: install install-dev run format check lint collect test
+.PHONY: install install-dev run format check lint collect unit-test test
 
 # Optional overrides:  make run MODEL=Qwen/Qwen3.5-27B CAPABILITY=tools
 MODEL ?=
@@ -34,6 +34,11 @@ lint: check
 collect:
 	pytest --collect-only -q
 
-# Full suite (needs CSCS_SERVING_API / MCS_API_KEY set).
+# Offline unit tests for the CLI/config/comparison logic itself (mcs/tests/) --
+# no API key or live endpoint needed, unlike the capability suites below.
+unit-test:
+	pytest mcs/tests -q
+
+# Full capability suite (needs CSCS_SERVING_API / MCS_API_KEY set).
 test:
 	pytest

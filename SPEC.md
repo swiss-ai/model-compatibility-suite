@@ -539,3 +539,89 @@ Design notes for the implementer:
   `--reasoning-parser qwen3` (vLLM's generic stream-splitter, not Apertus-specific).
   Miss the `enable_thinking` default and the template emits no thinking, so the
   whole `reasoning` suite skips.
+
+## 13. Multi-provider comparison (config file)
+
+Today `--model A --model B` (§9 q4) compares multiple *models* against a
+single `api_base`/`api_key` pair. It does not cover the other axis a real
+evaluation needs: the **same or different model served by different
+providers** — e.g. a CSCS reference deployment vs. RCP, or a client's own
+endpoint vs. the CSCS reference — each with its own base URL, key, and
+(often) its own model identifier for what is nominally "the same model".
+
+Design: two mutually exclusive invocation modes, not a merge of both.
+
+- **Args mode** (existing, unchanged): `--base-url` / `MCS_API_BASE` + one
+  `api_key` resolved from env, plus one-or-many `--model`. Single provider,
+  one-or-many models. This stays the default path — no config file required.
+- **Config mode** (new): `--providers-config <path.yaml>` points at a file
+  enumerating named providers, each with its own `base_url`, `api_key_env`
+  (the *name* of an env var holding the key — never the raw key in the file,
+  so secrets stay out of the repo/CI logs), and `model`. Every provider in
+  the file runs — there is deliberately no `--provider NAME` subset flag;
+  the file itself is the selection (a client-facing config might list just
+  `cscs` and `client-reference`, dropping unrelated providers rather than
+  filtering them out at invocation time).
+
+**Strict mutual exclusion — no silent precedence.** A run is either
+args-driven or config-driven, never both, and the CLI must refuse rather than
+guess which one the user meant:
+- `--providers-config` together with `--base-url` or `--model` on the same
+  invocation is a hard error (`argparse` mutually-exclusive group, or an
+  explicit check in `cli.py` before `Config.from_env()` runs) — exit
+  non-zero with a message naming both flags, never "config wins" /
+  "args win" silently.
+- The tricky part: `MCS_API_BASE` / `MCS_MODEL` / `MCS_API_KEY` already have
+  defaults baked into `Config.from_env()` (§3), so their mere presence in
+  `os.environ` doesn't distinguish "user set this on purpose" from "the
+  default". Detection must happen at the flag/CLI layer — check `sys.argv`
+  (or argparse's own "was this option given" state, e.g. comparing against
+  `parser.get_default(...)`) for `--base-url`/`--model`, not by inspecting
+  resolved env values after the fact. If `--providers-config` is set, those
+  flags must not have been explicitly passed either.
+- Same rule for `--rate-limit`/`--timeout`: explicit CLI use of either
+  together with `--providers-config` is also an error, since config mode
+  gets per-provider values from the YAML (with the `MCS_*` env defaults as
+  fallback only inside a provider entry, not as a competing top-level
+  override).
+
+```yaml
+# providers.yaml
+providers:
+  cscs:
+    base_url: https://api.swissai.svc.cscs.ch/v1
+    api_key_env: SWISSAI_RESEARCH_API_KEY
+    model: swiss-ai/Apertus-8B-Instruct-2509
+  rcp:
+    base_url: https://rcp.example.ch/v1
+    api_key_env: RCP_API_KEY
+    model: some-other-org/their-model-name
+```
+
+Design notes for the implementer:
+- Each provider entry becomes a `Config` (§3 config table fields: `api_base`,
+  `api_key`, `model`, plus optional per-provider `timeout`/`rate_limit`
+  overrides, falling back to the `MCS_TIMEOUT`/`MCS_RATE_LIMIT` defaults when
+  omitted) — no change to the `Config` dataclass itself.
+- Reuses `report_compare()` (`capabilities.py`) unchanged: it already takes a
+  `list[Config]` and only assumed (incorrectly, for this use case) that every
+  config shared one `api_base`. The compare-table header/legend needs to
+  switch from "column = model id" to "column = provider name" when configs
+  don't share an `api_base`, so a client reading the table sees `cscs` /
+  `rcp`, not two ambiguous model-id columns that may collide if both
+  providers happen to name the model the same thing.
+- `--record-responses DIR` (§8) should namespace by provider name as well as
+  model id (`DIR/<test-name>/<provider>_<model>_input.txt`) once providers
+  can differ — today the model id alone is a unique key per column, which
+  stops being true across providers with same/blank model ids.
+- Validate the YAML eagerly (missing `base_url`/`api_key_env`/`model` on any
+  entry, unresolved `api_key_env` at runtime) with a clear error naming the
+  offending provider — fail loudly, no silent skips (§8 convention).
+- No new dependency required beyond a YAML parser (`pyyaml`), added to
+  `pyproject.toml` `dependencies`.
+- **Unit tests** (`mcs/tests/`, offline, no API key): this logic is pure —
+  `load_providers()` parsing/validation and `report_compare()`/`report()`
+  label selection — and testable by mocking `run_checks()`, unlike the rest
+  of this repo's tests (`mcs/suites/`), which need a live/mocked OpenAI-
+  compatible endpoint. `make unit-test` / `pytest mcs/tests -q`; wired into CI as
+  a separate `unit` job alongside `lint`/`collect`.

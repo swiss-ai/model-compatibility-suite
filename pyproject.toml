@@ -12,6 +12,7 @@ classifiers = ["License :: OSI Approved :: Apache Software License"]
 dependencies = [
     "requests",
     "pytest",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
