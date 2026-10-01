@@ -47,6 +47,10 @@ class Config:
     model: str
     timeout: float
     rate_limit: float
+    # Provider name from a --providers-config entry (SPEC.md §13); "" for the
+    # plain args/env-var mode. Used only for display (compare-table columns,
+    # recording filenames) -- never affects request behavior.
+    label: str = ""
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -64,3 +68,59 @@ class Config:
             # MCS_RATE_LIMIT) to stay under such caps.
             rate_limit=float(_env("MCS_RATE_LIMIT", default="0")),
         )
+
+
+def load_providers(path: str) -> list:
+    """Load every named provider from a YAML file (SPEC.md §13) into Configs.
+
+    Each entry under `providers:` needs `base_url`, `api_key_env` (the NAME of
+    an env var holding the bearer token -- never the raw key in the file), and
+    `model`; `timeout`/`rate_limit` are optional per-provider overrides,
+    falling back to MCS_TIMEOUT/MCS_RATE_LIMIT (§3) when omitted.
+
+    Runs every provider in the file, in file order -- there is no separate
+    "pick a subset" flag. The file itself is the selection: put only the
+    providers you want compared in a given run in it. Raises ValueError on
+    any missing/unresolved field, naming the offending provider -- fail
+    loudly, no silent skips (§8).
+    """
+    import yaml
+
+    with open(path, encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    providers = data.get("providers") or {}
+    if not providers:
+        raise ValueError(
+            f"no providers defined in {path} (expected a 'providers:' map)"
+        )
+
+    configs = []
+    for name in providers:
+        entry = providers[name] or {}
+        missing = [k for k in ("base_url", "api_key_env", "model") if not entry.get(k)]
+        if missing:
+            raise ValueError(
+                f"provider '{name}' in {path} is missing required field(s): "
+                f"{', '.join(missing)}"
+            )
+        key_env = entry["api_key_env"]
+        api_key = os.environ.get(key_env, "")
+        if not api_key:
+            raise ValueError(
+                f"provider '{name}': env var {key_env} (its api_key_env) is not set"
+            )
+        configs.append(
+            Config(
+                api_base=str(entry["base_url"]).rstrip("/"),
+                api_key=api_key,
+                model=entry["model"],
+                timeout=float(
+                    entry.get("timeout") or _env("MCS_TIMEOUT", default="120")
+                ),
+                rate_limit=float(
+                    entry.get("rate_limit") or _env("MCS_RATE_LIMIT", default="0")
+                ),
+                label=name,
+            )
+        )
+    return configs

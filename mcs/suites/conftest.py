@@ -59,10 +59,14 @@ def _record_responses(request):
 
     from mcs import recording
 
+    model_label = os.environ.get("MCS_MODEL", "model")
+    provider = os.environ.get("MCS_PROVIDER_LABEL")
+    if provider:
+        model_label = f"{provider}_{model_label}"
     recording.configure(
         os.environ.get("MCS_RECORD_DIR"),
         request.node.name,
-        os.environ.get("MCS_MODEL", "model"),
+        model_label,
     )
     yield
     recording.reset()

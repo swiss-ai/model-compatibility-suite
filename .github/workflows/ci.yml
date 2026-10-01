@@ -37,6 +37,20 @@ jobs:
       - name: pytest collection only (no API calls)
         run: pytest --collect-only -q
 
+  # Unit tests for the CLI/config/comparison logic (mcs/tests/) -- offline, no
+  # API key needed, distinct from the live capability suites below.
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - name: pytest mcs/tests/
+        run: pytest mcs/tests -q
+
   # Live suite -- runs only when an endpoint secret is configured.
   suite:
     name: Functional suite (live)

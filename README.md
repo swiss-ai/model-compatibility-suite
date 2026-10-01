@@ -42,6 +42,7 @@ mcs --spec dev                   # + checks needing /tokenize etc.
 mcs --model A --model B          # compare models (table)
 mcs --model A --model B --detail # + per-model failure reasons
 mcs --json                       # machine-readable
+mcs --providers-config providers.yaml   # compare every provider in the file
 ```
 
 Status per check: `✔` pass · `✗` an assertion failed (a real gap) · `⚠` the
@@ -139,6 +140,43 @@ The `reason_*` skips are expected — these are the non-thinking builds. The
 | `MCS_API_BASE` | `https://api.swissai.svc.cscs.ch/v1` |
 | `MCS_API_KEY` (or `SWISSAI_RESEARCH_API_KEY`) | — (required) |
 | `MCS_MODEL` | `CSCS-Inference/swiss-ai/Apertus-8B-Instruct-2509` |
+
+## Comparing across providers
+
+To compare the same suite run across different serving endpoints -- e.g. a
+CSCS reference deployment vs. RCP, or a client's own endpoint vs. the CSCS
+reference -- point `mcs` at a YAML file of named providers instead of
+`--base-url`/`--model`:
+
+```yaml
+# providers.yaml
+providers:
+  cscs:
+    base_url: https://api.swissai.svc.cscs.ch/v1
+    api_key_env: SWISSAI_RESEARCH_API_KEY   # name of the env var holding the key
+    model: swiss-ai/Apertus-8B-Instruct-2509
+  rcp:
+    base_url: https://rcp.example.ch/v1
+    api_key_env: RCP_API_KEY
+    model: some-other-org/their-model-name
+```
+
+```bash
+export SWISSAI_RESEARCH_API_KEY=...
+export RCP_API_KEY=...
+mcs --providers-config providers.yaml   # runs every provider in the file
+```
+
+There's no flag to select a subset -- the file itself is the selection: put
+only the providers you want compared in a given run in it (e.g. drop `rcp`
+above if you just want the CSCS reference alone).
+
+`--providers-config` is a separate mode from `--base-url`/`--model`/
+`--rate-limit` (and their `MCS_*` env equivalents) -- combining them is a
+hard error, since a run is either args-driven or config-driven, never both.
+The file never holds a raw key, only the *name* of the env var to read it
+from. See [`SPEC.md` §13](./SPEC.md#13-multi-provider-comparison-config-file)
+for the full design.
 
 ## Suites
 

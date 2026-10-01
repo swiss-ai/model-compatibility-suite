@@ -16,6 +16,9 @@
 #
 # Flags: --suite a,b  --model ID  --spec openai|dev  --base-url URL  --junit PATH
 #        --rate-limit N  --local
+#        --providers-config PATH  (compare across providers/endpoints in the
+#        file, e.g. CSCS vs RCP; mutually exclusive with --base-url/--model/
+#        --rate-limit -- see SPEC.md section 13)
 # Config via env: MCS_API_BASE, MCS_API_KEY|SWISSAI_RESEARCH_API_KEY,
 #                 MCS_MODEL, MCS_TIMEOUT, MCS_RATE_LIMIT.
 # See SPEC.md section 3.
@@ -32,8 +35,16 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ -z "${MCS_API_KEY:-}" ] && [ -z "${SWISSAI_RESEARCH_API_KEY:-}" ] \
-  && [ -z "${CSCS_SERVING_API:-}" ]; then
+# --providers-config resolves each provider's key from its own api_key_env
+# (SPEC.md §13), not MCS_API_KEY/SWISSAI_RESEARCH_API_KEY -- `mcs` itself
+# validates those; skip this single-key precheck in that mode.
+USES_PROVIDERS_CONFIG=0
+for a in "${ARGS[@]+"${ARGS[@]}"}"; do
+  case "$a" in --providers-config|--providers-config=*) USES_PROVIDERS_CONFIG=1 ;; esac
+done
+
+if [ "$USES_PROVIDERS_CONFIG" -eq 0 ] && [ -z "${MCS_API_KEY:-}" ] \
+  && [ -z "${SWISSAI_RESEARCH_API_KEY:-}" ] && [ -z "${CSCS_SERVING_API:-}" ]; then
   echo "error: set SWISSAI_RESEARCH_API_KEY (or MCS_API_KEY) to your bearer token" >&2
   exit 2
 fi

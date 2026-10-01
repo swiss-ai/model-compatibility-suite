@@ -121,6 +121,13 @@ def run_checks(
     os.environ["MCS_RATE_LIMIT"] = str(config.rate_limit)
     if config.api_key:
         os.environ["MCS_API_KEY"] = config.api_key
+    # Namespaces --record-responses filenames by provider too, once providers
+    # can differ (SPEC.md §13) -- the model id alone stops being a unique
+    # column key when two providers serve models with the same/blank id.
+    if config.label:
+        os.environ["MCS_PROVIDER_LABEL"] = config.label
+    else:
+        os.environ.pop("MCS_PROVIDER_LABEL", None)
 
     args = [_SUITES_DIR, "-o", "python_files=*.py", "-p", "no:cacheprovider", "-q"]
     marker = f"({capability})" if capability else "not perf"
@@ -157,6 +164,7 @@ def report(
                 {
                     "model": config.model,
                     "api_base": config.api_base,
+                    "provider": config.label or None,
                     "checks": [r.__dict__ for r in results],
                 },
                 indent=2,
@@ -164,7 +172,10 @@ def report(
         )
         return _exit_code(results)
 
-    print(f"Capability checks for {config.model}")
+    title = config.model
+    if config.label:
+        title += f"  (provider: {config.label})"
+    print(f"Capability checks for {title}")
     print(f"  endpoint: {config.api_base}\n")
     if not results:
         print("  (no checks ran -- unknown --capability, or no API key?)")
@@ -189,11 +200,18 @@ def report_compare(
     as_json: bool = False,
     detail: bool = False,
 ) -> int:
-    """Compare >=2 models. Transposed table (checks down, models across) with one
-    glyph per cell; columns M1/M2/... keep it narrow, full ids in a legend. With
-    detail=True, failure reasons are listed as per-model footnotes."""
+    """Compare >=2 configs. Transposed table (checks down, columns across) with
+    one glyph per cell; columns M1/M2/... keep it narrow, full ids/endpoints in
+    a legend. Configs may be different models on one endpoint (--model A
+    --model B) or different providers/endpoints (--providers-config, SPEC.md
+    §13) -- column labels use each config's `label` (provider name) when set,
+    else its model id. With detail=True, failure reasons are listed as
+    per-column footnotes."""
+    labels = [c.label or c.model for c in configs]
+    same_base = len({c.api_base for c in configs}) == 1
     runs = [
-        (c.model, {r.name: r for r in run_checks(c, capability, spec)}) for c in configs
+        (labels[i], {r.name: r for r in run_checks(c, capability, spec)})
+        for i, c in enumerate(configs)
     ]
     names = []
     for _, res in runs:
@@ -207,12 +225,19 @@ def report_compare(
         print(
             json.dumps(
                 {
-                    "api_base": configs[0].api_base,
-                    "models": [m for m, _ in runs],
+                    "api_base": configs[0].api_base if same_base else None,
+                    "providers": [
+                        {
+                            "label": labels[i],
+                            "api_base": c.api_base,
+                            "model": c.model,
+                        }
+                        for i, c in enumerate(configs)
+                    ],
                     "checks": {
                         n: {
-                            m: (res[n].__dict__ if n in res else None)
-                            for m, res in runs
+                            label: (res[n].__dict__ if n in res else None)
+                            for label, res in runs
                         }
                         for n in names
                     },
@@ -228,7 +253,12 @@ def report_compare(
     cols = [f"M{i + 1}" for i in range(len(runs))]
     colw = [len(c) for c in cols]
     w = max(len(n) for n in names + ["passed", "failed/broken", "skipped"])
-    print(f"Capability comparison ({configs[0].api_base})\n")
+    header_line = (
+        f"Capability comparison ({configs[0].api_base})\n"
+        if same_base
+        else f"Capability comparison across {len(configs)} providers\n"
+    )
+    print(header_line)
     header = " | ".join(f"{c:<{cw}}" for c, cw in zip(cols, colw))
     print(f"| {'Check':<{w}} | " + header + " |")
     print(f"|{'-' * (w + 2)}|" + "".join("-" * (cw + 2) + "|" for cw in colw))
@@ -254,14 +284,17 @@ def report_compare(
         ]
         print(f"| {label:<{w}} | " + " | ".join(cells) + " |")
     print("\nLegend: ✔ pass · ✗ fail · ⚠ broken · – skip")
-    for i, (m, _) in enumerate(runs):
-        print(f"M{i + 1} = {m}")
+    for i, c in enumerate(configs):
+        if same_base:
+            print(f"M{i + 1} = {labels[i]}")
+        else:
+            print(f"M{i + 1} = {labels[i]} — {c.api_base} — model {c.model}")
 
     if detail:
         print("\nFailure details (non-pass checks):")
-        for i, (m, res) in enumerate(runs):
+        for i, (label, res) in enumerate(runs):
             fails = [res[n] for n in names if n in res and res[n].status != PASS]
-            print(f"\nM{i + 1} = {m}")
+            print(f"\nM{i + 1} = {label}")
             if not fails:
                 print("  (all checks passed)")
             for r in fails:
