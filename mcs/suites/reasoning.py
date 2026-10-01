@@ -284,6 +284,56 @@ def test_reason_tools(client, reasoning_supported):
         )
 
 
+def test_reason_tools_in_thinking(client, reasoning_supported):
+    """reason-tools-in-thinking: a tool call made INSIDE the deliberation block
+    must surface as `tool_calls`, not vanish into `reasoning_content`.
+    (apertus-program#1134, problem 4)
+
+    In the v1.5 tool SFT data the model calls tools inside its thinking:
+    `<|inner_prefix|>...<|tools_prefix|>[...]<|tools_suffix|>` with NO
+    `<|inner_suffix|>` before the call. The released reasoning parser treats the
+    missing end token as "still thinking", labels the whole output `reasoning`,
+    and the tool parser never sees the call -- the client gets
+    `finish_reason="stop"` and no tool call. reason-tools forces the call with
+    `tool_choice="required"`; this test leaves the choice to the model, which is
+    the path real agents take and the one that fails. Skipped when the endpoint
+    rejects tools outright (that gap belongs to the `tools` suite).
+    """
+    try:
+        resp = client.chat(
+            [
+                {
+                    "role": "user",
+                    "content": "What is the weather in Zurich right now? "
+                    "You have a weather tool; use it.",
+                }
+            ],
+            tools=[WEATHER_TOOL],
+            max_tokens=REASON_MAX_TOKENS,
+        )
+    except ApiError as exc:
+        pytest.skip(f"tool calling not supported by endpoint: {exc}")
+
+    msg = resp["choices"][0]["message"]
+    reasoning = ChatClient.reasoning_content(resp) or ""
+    tool_calls = msg.get("tool_calls") or []
+    buried = "get_weather" in reasoning and (
+        "<|tools_prefix|>" in reasoning or '"get_weather":' in reasoning
+    )
+    assert not buried, (
+        "the tool call was emitted inside the deliberation block and the "
+        "reasoning parser kept it as reasoning_content, so tool_calls is empty "
+        f"(apertus-program#1134 problem 4). reasoning[-300:]={reasoning[-300:]!r}"
+    )
+    assert tool_calls, (
+        "model answered without a tool call although the prompt asked for one; "
+        f"finish_reason={resp['choices'][0]['finish_reason']!r} "
+        f"content={(ChatClient.content(resp) or '')[:160]!r}"
+    )
+    assert tool_calls[0]["function"]["name"] == "get_weather"
+    json.loads(tool_calls[0]["function"]["arguments"])
+
+
 class _StreamedTurn(NamedTuple):
     """What one streamed turn produced, per channel."""
 

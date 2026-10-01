@@ -479,6 +479,170 @@ def test_tools_empty_args(client, tools_supported):
     )
 
 
+# --- swiss-ai/apertus-program#1134: chat-template regressions on Apertus v1.5 -----
+# Three structural bugs in the released v1.5 chat template, reported with exact
+# payloads by @RamonKaspar. Reproduced 2026-10-01 through the SwissAI API on both
+# the CSCS and RCP deployments of v1.5-8B and -70B. The tests below replay those
+# payloads so the fixes are verifiable (and regressions loud) across providers.
+
+# #1134 problem 1: a tool WITHOUT parameters -- its call in history has `{}` args.
+PWD_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "pwd",
+        "description": "Return the current directory.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+# #1134 problem 2: an `enum` parameter whose default is NOT a string.
+TIMER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "set_timer",
+        "description": "Set a timer.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "minutes": {"type": "integer", "enum": [5, 10, 15], "default": 10}
+            },
+        },
+    },
+}
+
+# #1134 problem 3: a completed call whose result the model must now USE, not redo.
+RATE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_exchange_rate",
+        "description": "Exchange rate between two currencies.",
+        "parameters": {
+            "type": "object",
+            "properties": {"base": {"type": "string"}, "target": {"type": "string"}},
+            "required": ["base", "target"],
+        },
+    },
+}
+_RATE_ARGS = {"base": "EUR", "target": "CHF"}
+
+
+def test_tools_history_empty_args(client, tools_supported):
+    """tools-history-empty-args: replaying a tool call with EMPTY arguments must
+    not 400. (apertus-program#1134, problem 1)
+
+    The history holds an assistant turn that called a parameterless tool with
+    `arguments: "{}"`, then its tool result. The released v1.5 template guards the
+    call with `if tool_call.name and tool_call.arguments`; vLLM hands the
+    arguments over as a dict and Jinja treats `{}` as false, so the template
+    raises "Invalid tool call" and the server answers HTTP 400. Any agent loop
+    that ever calls a no-arg tool (pwd, ls, list_tables, ...) is then stuck for
+    the rest of the conversation. Distinct from tools-empty-args, which checks
+    the model EMITS `{}` -- this checks the template ACCEPTS it back.
+    """
+    messages = [
+        {"role": "user", "content": "In which directory am I?"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": "pwd", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_0", "content": "/alex/workspace"},
+    ]
+    try:
+        resp = client.chat(messages, tools=[PWD_TOOL], max_tokens=128)
+    except ApiError as exc:
+        pytest.fail(
+            "replaying a tool call with empty arguments was rejected "
+            f"(apertus-program#1134 problem 1): HTTP {exc.status} {exc.body[:200]}"
+        )
+    content = ChatClient.content(resp) or ""
+    assert "workspace" in content, (
+        f"model did not use the tool result in its answer: {content!r}"
+    )
+
+
+def test_tools_nonstring_default(client, tools_supported):
+    """tools-nonstring-default: a schema default that is not a string must not
+    400. (apertus-program#1134, problem 2)
+
+    `{"type": "integer", "enum": [5, 10, 15], "default": 10}` is ordinary JSON
+    Schema; the released v1.5 template does `"// default: " + param_spec.default`
+    and Jinja refuses `str + int` -> HTTP 400 'can only concatenate str (not
+    "int") to str'. 121 of the 1053 BFCL items carry such a parameter, so this
+    single line also drags the benchmark score. Pass criterion is structural:
+    the request succeeds and any emitted call has JSON-parseable arguments.
+    """
+    try:
+        resp = client.chat(
+            [{"role": "user", "content": "Set a timer for 15 minutes."}],
+            tools=[TIMER_TOOL],
+            max_tokens=128,
+        )
+    except ApiError as exc:
+        pytest.fail(
+            "a tool with a non-string default was rejected "
+            f"(apertus-program#1134 problem 2): HTTP {exc.status} {exc.body[:200]}"
+        )
+    for call in _tool_calls(resp):
+        json.loads(call["function"]["arguments"])
+
+
+def test_tools_continue_after_result(client, tools_supported):
+    """tools-continue-after-result: after a tool result the model must USE it,
+    not re-issue the same call. (apertus-program#1134, problem 3)
+
+    In the v1.5 tool SFT data a tool result is always followed by the model
+    continuing ITS OWN turn (more thinking, more calls, or the answer). The
+    released template instead closes the turn and opens a new one
+    (`<|tool_output_end|><|assistant_end|><|assistant_start|>`), a prompt shape
+    the model never saw. The visible symptom is the model treating the result as
+    stale and calling the same tool again with the same arguments. Observed live
+    on CSCS v1.5-8B (2026-10-01): `get_exchange_rate(EUR, CHF)` re-issued right
+    after its own result. Pass criteria: no tool call duplicates the one already
+    answered, and the answer mentions the result (235 = 250 * 0.94, or the rate).
+    """
+    messages = [
+        {"role": "user", "content": "How many Swiss francs do I get for 250 euros?"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {
+                        "name": "get_exchange_rate",
+                        "arguments": json.dumps(_RATE_ARGS),
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_0", "content": '{"rate": 0.94}'},
+    ]
+    resp = client.chat(messages, tools=[RATE_TOOL], max_tokens=256)
+    repeated = [
+        c
+        for c in _tool_calls(resp)
+        if c["function"]["name"] == "get_exchange_rate"
+        and json.loads(c["function"]["arguments"]) == _RATE_ARGS
+    ]
+    assert not repeated, (
+        "model re-issued the tool call it was just given the result for "
+        "(template opened a new assistant turn instead of continuing the current "
+        f"one, apertus-program#1134 problem 3): {repeated[0]['function']!r}"
+    )
+    content = ChatClient.content(resp) or ""
+    assert "235" in content or "0.94" in content, (
+        f"answer does not use the tool result: {content!r}"
+    )
+
+
 def test_tools_phantom(client, tools_supported):
     """tools-phantom: the model must not fabricate a call to an un-offered tool.
 
