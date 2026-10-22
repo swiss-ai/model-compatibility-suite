@@ -643,6 +643,55 @@ def test_tools_continue_after_result(client, tools_supported):
     )
 
 
+@pytest.mark.dev
+def test_tools_prompt_continues_after_result(client, tools_supported):
+    """tools-prompt-continues-after-result: the rendered prompt for a history that
+    ends with a tool result must NOT close the assistant turn and open a new one.
+    (apertus-program#1134, problem 3)
+
+    The deterministic twin of tools-continue-after-result. That check watches the
+    model, and the model's reaction to the wrong prompt shape shows only over many
+    samples (it passes on the released v1.5-8B). This one reads the prompt itself
+    through `/tokenize`: the released template ends it
+    `<|tool_output_end|><|assistant_end|><|assistant_start|>`; the tool SFT data
+    never has a new turn after a tool result, so it must end `<|tool_output_end|>`.
+    Skipped when `/tokenize` is unavailable or the template does not use Apertus'
+    tool-output delimiters.
+    """
+    messages = [
+        {"role": "user", "content": "How many Swiss francs do I get for 250 euros?"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {
+                        "name": "get_exchange_rate",
+                        "arguments": json.dumps(_RATE_ARGS),
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_0", "content": '{"rate": 0.94}'},
+    ]
+    try:
+        ids = client.tokenize_chat(messages, tools=[RATE_TOOL])
+        tail = client.detokenize(ids[-12:])
+    except ApiError as exc:
+        pytest.skip(f"/tokenize or /detokenize not available: {exc}")
+    if "<|tool_output_end|>" not in tail:
+        pytest.skip("template does not use Apertus tool-output delimiters")
+    assert not re.search(
+        r"<\|tool_output_end\|>\s*<\|assistant_end\|>\s*<\|assistant_start\|>\s*$",
+        tail,
+    ), (
+        "the prompt after a tool result closes the assistant turn and opens a new "
+        f"one (apertus-program#1134 problem 3): tail={tail!r}"
+    )
+
+
 def test_tools_phantom(client, tools_supported):
     """tools-phantom: the model must not fabricate a call to an un-offered tool.
 
