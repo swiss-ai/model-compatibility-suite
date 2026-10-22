@@ -399,6 +399,101 @@ def _assert_streamed_weather_call(turn: _StreamedTurn, context: str) -> None:
         )
 
 
+# apertus-program#1134 problem 4, as reported: a multi-step search-agent system
+# prompt (from nvidia/Nemotron-SFT-Agentic-v2) makes the model plan in its thinking
+# and call the tool from inside it. The one-line weather prompt of
+# reason-tools-in-thinking never gets there: the 8B calls the tool without
+# thinking, so that check also passes on the broken parser.
+_SEARCH_AGENT_SYSTEM = (
+    "You are an expert search agent. Your goal is to answer the user's question "
+    "efficiently using verifiable online sources.\n\nExecution Rules:\n"
+    "1. ** Seach Results ** - Each search query returns 10 detailed results or "
+    "sources. Use as many tool calls as required but do not spam searches.\n"
+    "2. ** Planning ** - Start by breaking the problem into multiple key "
+    "sub-questions (as many as required only). If you aren't confident about "
+    "something, break it down into smaller sub-questions.\n"
+    "2. ** Tool Use ** - You MUST make at least 3 distinct tool calls.\n"
+    "3. ** Avoid Duplicates ** - If a search fails, pivot your strategy instantly.\n"
+    "4. ** MAXIMUM 25 Calls ** - You MUST finish within 25 tool calls. Keep a "
+    "counter in your thought process to track the number of tool calls you have "
+    "made. If you hit 25, stop searching and derive the best answer immediately.\n"
+    "5. ** Verification ** - Cross-check critical facts (dates, names, locations) "
+    "with a second source.\n"
+    "6. ** Output Format ** - The last line of your output must be EXACTLY: "
+    '"Final Answer: <The Entity>" (replace <The Entity> with the actual '
+    "answer).\n"
+    "7. ** Response Format ** - The response format must be as follows, the "
+    "angular brackets should be replaced with the actual content:\n"
+    "  - Thought: <Explain your next step>\n"
+    "  - Search: <Tool Call>\n"
+    "  - Observation: <Concise summary of findings>\n"
+    "  ... (repeat thought, search, observation as needed) ...\n"
+    "  - Final Answer: <The Entity>, replace <The Entity> with the actual answer."
+)
+_SEARCH_AGENT_QUESTION = (
+    "Which electrical plug type is standard in the country that includes the "
+    "province containing the commune that is twinned with the city twinned with "
+    "Launceston?"
+)
+_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web-search",
+        "description": "Search the web for a query.",
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "Search query."}},
+            "required": ["query"],
+        },
+    },
+}
+
+
+def test_reason_tools_in_thinking_agent(client):
+    """reason-tools-in-thinking-agent: with an agent system prompt that makes the
+    model plan first, the call it makes from inside its thinking must surface in
+    `tool_calls`. (apertus-program#1134, problem 4, the issue's own request)
+
+    Same assertion as reason-tools-in-thinking, on the request that actually
+    triggers the bug: thinking on, the tool choice left to the model, and a
+    system prompt that has it reason before the first call. Released parser:
+    `finish_reason="stop"`, `tool_calls` empty, the call text inside the
+    reasoning. Skipped when the endpoint rejects tools or has no reasoning
+    channel (those gaps belong to the `tools` suite and to reason-produced).
+    """
+    try:
+        resp = client.chat(
+            [
+                {"role": "system", "content": _SEARCH_AGENT_SYSTEM},
+                {"role": "user", "content": _SEARCH_AGENT_QUESTION},
+            ],
+            tools=[_SEARCH_TOOL],
+            max_tokens=REASON_MAX_TOKENS,
+            extra={"chat_template_kwargs": {"enable_thinking": True}},
+        )
+    except ApiError as exc:
+        pytest.skip(f"tool calling not supported by endpoint: {exc}")
+
+    msg = resp["choices"][0]["message"]
+    reasoning = ChatClient.reasoning_content(resp) or ""
+    tool_calls = msg.get("tool_calls") or []
+    buried = "web-search" in reasoning and (
+        "<|tools_prefix|>" in reasoning or '"web-search":' in reasoning
+    )
+    assert not buried, (
+        "the tool call was emitted inside the deliberation block and the "
+        "reasoning parser kept it as reasoning_content, so tool_calls is empty "
+        f"(apertus-program#1134 problem 4). reasoning[-300:]={reasoning[-300:]!r}"
+    )
+    assert tool_calls, (
+        "model answered without a tool call although the prompt requires one; "
+        f"finish_reason={resp['choices'][0]['finish_reason']!r} "
+        f"content={(ChatClient.content(resp) or '')[:160]!r}"
+    )
+    assert tool_calls[0]["function"]["name"] == "web-search"
+    json.loads(tool_calls[0]["function"]["arguments"])
+
+
 def test_reason_tools_stream(client, reasoning_supported):
     """reason-tools-stream: reasoning- and tool-parser cooperate WHILE STREAMING.
 

@@ -225,22 +225,28 @@ class ChatClient:
             raise ApiError(resp.status_code, resp.text)
         return resp.json()["tokens"]
 
-    def tokenize_chat(self, messages: list, add_generation_prompt: bool = True) -> list:
+    def tokenize_chat(
+        self,
+        messages: list,
+        add_generation_prompt: bool = True,
+        tools: list | None = None,
+    ) -> list:
         """Token ids the server produces for ``messages`` via the ``/tokenize``
         endpoint's chat form -- the server applies its OWN chat template and then
         tokenizes the rendered string. This is the path a chat client hits, and the
         one the double-BOS bug lives on: the template emits the BOS, and if the
         server also tokenizes with ``add_special_tokens=True`` the prompt starts
         ``<s><s>...``. ``add_special_tokens`` is deliberately NOT sent, so the
-        result reflects the server's own default for chat tokenization."""
-        resp = self._post(
-            "/tokenize",
-            {
-                "model": self.config.model,
-                "messages": messages,
-                "add_generation_prompt": add_generation_prompt,
-            },
-        )
+        result reflects the server's own default for chat tokenization. ``tools``
+        is passed through so templates that render the tool schema see it."""
+        body = {
+            "model": self.config.model,
+            "messages": messages,
+            "add_generation_prompt": add_generation_prompt,
+        }
+        if tools is not None:
+            body["tools"] = tools
+        resp = self._post("/tokenize", body)
         if not resp.ok:
             raise ApiError(resp.status_code, resp.text)
         return resp.json()["tokens"]
