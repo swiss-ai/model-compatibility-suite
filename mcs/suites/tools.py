@@ -593,6 +593,38 @@ def test_tools_nonstring_default(client, tools_supported):
         json.loads(call["function"]["arguments"])
 
 
+def test_tools_no_description(client, tools_supported):
+    """tools-no-description: a tool without a `description` must not 400.
+    (apertus-program#1134, reported by mzueri)
+
+    `description` is optional in the OpenAI tool schema. The released v1.5
+    template does `"// " + tool.description` and Jinja refuses `str + None`
+    -> HTTP 400 'can only concatenate str (not "NoneType") to str'. Pass
+    criterion is structural: the request succeeds and any emitted call has
+    JSON-parseable arguments.
+    """
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "f",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    try:
+        resp = client.chat(
+            [{"role": "user", "content": "hi"}],
+            tools=[tool],
+            max_tokens=32,
+        )
+    except ApiError as exc:
+        pytest.fail(
+            "a tool without a description was rejected "
+            f"(apertus-program#1134): HTTP {exc.status} {exc.body[:200]}"
+        )
+    for call in _tool_calls(resp):
+        json.loads(call["function"]["arguments"])
+
+
 def test_tools_continue_after_result(client, tools_supported):
     """tools-continue-after-result: after a tool result the model must USE it,
     not re-issue the same call. (apertus-program#1134, problem 3)
