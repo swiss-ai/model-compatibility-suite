@@ -625,21 +625,9 @@ def test_tools_no_description(client, tools_supported):
         json.loads(call["function"]["arguments"])
 
 
-def test_tools_continue_after_result(client, tools_supported):
-    """tools-continue-after-result: after a tool result the model must USE it,
-    not re-issue the same call. (apertus-program#1134, problem 3)
-
-    In the v1.5 tool SFT data a tool result is always followed by the model
-    continuing ITS OWN turn (more thinking, more calls, or the answer). The
-    released template instead closes the turn and opens a new one
-    (`<|tool_output_end|><|assistant_end|><|assistant_start|>`), a prompt shape
-    the model never saw. The visible symptom is the model treating the result as
-    stale and calling the same tool again with the same arguments. Observed live
-    on CSCS v1.5-8B (2026-10-01): `get_exchange_rate(EUR, CHF)` re-issued right
-    after its own result. Pass criteria: no tool call duplicates the one already
-    answered, and the answer mentions the result (235 = 250 * 0.94, or the rate).
-    """
-    messages = [
+def _after_rate_result() -> list[dict]:
+    """A conversation that ends with the result of get_exchange_rate(EUR, CHF)."""
+    return [
         {"role": "user", "content": "How many Swiss francs do I get for 250 euros?"},
         {
             "role": "assistant",
@@ -657,7 +645,23 @@ def test_tools_continue_after_result(client, tools_supported):
         },
         {"role": "tool", "tool_call_id": "call_0", "content": '{"rate": 0.94}'},
     ]
-    resp = client.chat(messages, tools=[RATE_TOOL], max_tokens=256)
+
+
+def test_tools_continue_after_result(client, tools_supported):
+    """tools-continue-after-result: after a tool result the model must USE it,
+    not re-issue the same call. (apertus-program#1134, problem 3)
+
+    In the v1.5 tool SFT data a tool result is always followed by the model
+    continuing ITS OWN turn (more thinking, more calls, or the answer). The
+    released template instead closes the turn and opens a new one
+    (`<|tool_output_end|><|assistant_end|><|assistant_start|>`), a prompt shape
+    the model never saw. The visible symptom is the model treating the result as
+    stale and calling the same tool again with the same arguments. Observed live
+    on CSCS v1.5-8B (2026-10-01): `get_exchange_rate(EUR, CHF)` re-issued right
+    after its own result. Pass criteria: no tool call duplicates the one already
+    answered, and the answer mentions the result (235 = 250 * 0.94, or the rate).
+    """
+    resp = client.chat(_after_rate_result(), tools=[RATE_TOOL], max_tokens=256)
     repeated = [
         c
         for c in _tool_calls(resp)
@@ -672,6 +676,30 @@ def test_tools_continue_after_result(client, tools_supported):
     content = ChatClient.content(resp) or ""
     assert "235" in content or "0.94" in content, (
         f"answer does not use the tool result: {content!r}"
+    )
+
+
+def test_tools_stream_after_result(client, tools_supported):
+    """tools-stream-after-result: the streamed answer after a tool result arrives
+    once. (apertus-program#1134, reasoning parser)
+
+    Observed live on Apertus v1.5 8B and 70B (2026-11-25): with streaming, the
+    answer after a tool result came back twice in a row
+    ("...of 18°C.The weather in Bern...of 18°C."), thinking on and off. The
+    answer was streamed as content, and at the end of the stream the reasoning
+    parser's fallback handed the same text to vLLM again. Non-streaming was
+    correct, so only a streamed request shows it. Pass criteria: the streamed
+    content is not empty and is not one text repeated twice.
+    """
+    text = ChatClient.stream_text(
+        client.stream(_after_rate_result(), tools=[RATE_TOOL], max_tokens=256)
+    ).strip()
+    assert text, "no streamed content after the tool result"
+    half = len(text) // 2
+    first, second = text[:half].strip(), text[half:].strip()
+    assert first != second, (
+        "streamed answer after a tool result was sent twice "
+        f"(reasoning parser fallback, apertus-program#1134): {text!r}"
     )
 
 
